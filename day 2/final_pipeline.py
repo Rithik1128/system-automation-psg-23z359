@@ -4,155 +4,160 @@ from collections import Counter
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parent
-TRAINING_FILE = BASE_DIR / "data" / "day2_sample.csv"
-LOG_FILE = BASE_DIR / "final_pipeline.csv"
+FOLDER = Path(__file__).parent
+TRAIN_FILE = FOLDER / "data" / "day2_sample.csv"
+OUTPUT_FILE = FOLDER / "final_pipeline.csv"
+SENSORS = ["temperature", "pressure", "vibration", "current", "rpm"]
+STATES = ["NORMAL", "OVERHEATING", "HIGH_VIBRATION",
+          "MOTOR_OVERLOAD", "LOW_PRESSURE"]
 
 
-def generate_sensor_data():
-    state = random.choice([
-        "NORMAL",
-        "OVERHEATING",
-        "HIGH_VIBRATION",
-        "MOTOR_OVERLOAD",
-        "LOW_PRESSURE",
-    ])
+def random_reading():
+    condition = random.choice(STATES)
     reading = {
         "temperature": round(random.uniform(55, 72), 2),
         "pressure": round(random.uniform(4.2, 6.4), 2),
-        "vibration": round(random.uniform(1.0, 3.0), 2),
+        "vibration": round(random.uniform(1, 3), 2),
         "current": round(random.uniform(8, 15), 2),
         "rpm": random.randint(1400, 2200),
     }
-    if state == "OVERHEATING":
-        reading["temperature"] = round(random.uniform(81, 97), 2)
-    elif state == "HIGH_VIBRATION":
-        reading["vibration"] = round(random.uniform(5.5, 9.0), 2)
-    elif state == "MOTOR_OVERLOAD":
-        reading["current"] = round(random.uniform(18, 28), 2)
-    elif state == "LOW_PRESSURE":
-        reading["pressure"] = round(random.uniform(1.2, 3.5), 2)
+
+    ranges = {
+        "OVERHEATING": ("temperature", 81, 97),
+        "HIGH_VIBRATION": ("vibration", 5.5, 9),
+        "MOTOR_OVERLOAD": ("current", 18, 28),
+        "LOW_PRESSURE": ("pressure", 1.2, 3.5),
+    }
+    if condition != "NORMAL":
+        field, low, high = ranges[condition]
+        reading[field] = round(random.uniform(low, high), 2)
     return reading
 
 
-def apply_rules(reading):
-    if reading["pressure"] < 4.0:
-        return "LOW_PRESSURE", "REDUCE_LOAD"
-    if reading["current"] > 16:
-        return "MOTOR_OVERLOAD", "STOP_MACHINE"
-    if reading["vibration"] > 5.0:
-        return "HIGH_VIBRATION", "STOP_MACHINE"
-    if reading["temperature"] > 75:
-        return "OVERHEATING", "REDUCE_LOAD"
+def rules_for(reading):
+    checks = (
+        ("LOW_PRESSURE", "REDUCE_LOAD", reading["pressure"] < 4),
+        ("MOTOR_OVERLOAD", "STOP_MACHINE", reading["current"] > 16),
+        ("HIGH_VIBRATION", "STOP_MACHINE", reading["vibration"] > 5),
+        ("OVERHEATING", "REDUCE_LOAD", reading["temperature"] > 75),
+    )
+    for state, action, matched in checks:
+        if matched:
+            return state, action
     return "NORMAL", "CONTINUE_NORMAL"
 
 
-def load_training_data():
-    features = []
-    labels = []
-    with open(TRAINING_FILE, newline="") as file:
-        for row in csv.DictReader(file):
-            features.append([
-                float(row["temperature"]),
-                float(row["pressure"]),
-                float(row["vibration"]),
-                float(row["current"]),
-                float(row["rpm"]),
-            ])
-            labels.append(row["state"])
-    return features, labels
+def read_training_file():
+    inputs = []
+    outputs = []
+    with TRAIN_FILE.open(newline="", encoding="utf-8") as source:
+        for row in csv.DictReader(source):
+            inputs.append([float(row[name]) for name in SENSORS])
+            outputs.append(row["state"])
+    if not inputs:
+        raise ValueError("The training file is empty.")
+    return inputs, outputs
 
 
-def gini(labels):
-    counts = Counter(labels)
-    return 1 - sum((count / len(labels)) ** 2 for count in counts.values())
+def impurity(labels):
+    total = len(labels)
+    return 1 - sum((amount / total) ** 2 for amount in Counter(labels).values())
 
 
-def make_tree(features, labels, rng, depth=0):
-    majority = Counter(labels).most_common(1)[0][0]
-    if depth == 8 or len(labels) < 2 or len(set(labels)) == 1:
-        return majority
+def grow_tree(inputs, outputs, randomizer, level=0):
+    fallback = Counter(outputs).most_common(1)[0][0]
+    if level >= 8 or len(outputs) < 2 or len(set(outputs)) == 1:
+        return fallback
 
-    best = None
-    columns = rng.sample(range(5), 2)
-    for column in columns:
-        values = sorted(set(row[column] for row in features))
-        for split in values[:-1]:
-            left = [i for i, row in enumerate(features) if row[column] <= split]
-            right = [i for i, row in enumerate(features) if row[column] > split]
-            if not left or not right:
+    best_split = None
+    for column in randomizer.sample(range(len(SENSORS)), 2):
+        possible_splits = sorted({row[column] for row in inputs})
+        for cut in possible_splits[:-1]:
+            left_ids = [i for i, row in enumerate(inputs) if row[column] <= cut]
+            right_ids = [i for i, row in enumerate(inputs) if row[column] > cut]
+            if not left_ids or not right_ids:
                 continue
-            score = (
-                len(left) * gini([labels[i] for i in left])
-                + len(right) * gini([labels[i] for i in right])
-            ) / len(labels)
-            if best is None or score < best[0]:
-                best = (score, column, split, left, right)
 
-    if best is None:
-        return majority
-    _, column, split, left, right = best
+            left_labels = [outputs[i] for i in left_ids]
+            right_labels = [outputs[i] for i in right_ids]
+            score = (
+                len(left_labels) * impurity(left_labels)
+                + len(right_labels) * impurity(right_labels)
+            ) / len(outputs)
+            if best_split is None or score < best_split[0]:
+                best_split = (score, column, cut, left_ids, right_ids)
+
+    if best_split is None:
+        return fallback
+
+    _, column, cut, left_ids, right_ids = best_split
     return {
         "column": column,
-        "split": split,
-        "left": make_tree([features[i] for i in left], [labels[i] for i in left], rng, depth + 1),
-        "right": make_tree([features[i] for i in right], [labels[i] for i in right], rng, depth + 1),
+        "cut": cut,
+        "low": grow_tree(
+            [inputs[i] for i in left_ids],
+            [outputs[i] for i in left_ids],
+            randomizer,
+            level + 1,
+        ),
+        "high": grow_tree(
+            [inputs[i] for i in right_ids],
+            [outputs[i] for i in right_ids],
+            randomizer,
+            level + 1,
+        ),
     }
 
 
-def train(features, labels, tree_count=25):
-    rng = random.Random(42)
+def train(inputs, outputs, tree_count=25):
+    randomizer = random.Random(42)
     forest = []
     for _ in range(tree_count):
-        indexes = [rng.randrange(len(features)) for _ in features]
-        forest.append(make_tree(
-            [features[i] for i in indexes],
-            [labels[i] for i in indexes],
-            rng,
+        sample_ids = [
+            randomizer.randrange(len(inputs))
+            for _ in range(len(inputs))
+        ]
+        forest.append(grow_tree(
+            [inputs[i] for i in sample_ids],
+            [outputs[i] for i in sample_ids],
+            randomizer,
         ))
     return forest
 
 
-def predict(forest, reading):
-    votes = []
-    for tree in forest:
-        while isinstance(tree, dict):
-            side = "left" if reading[tree["column"]] <= tree["split"] else "right"
-            tree = tree[side]
-        votes.append(tree)
-    return Counter(votes).most_common(1)[0][0]
+def tree_vote(tree, values):
+    while isinstance(tree, dict):
+        branch = "low" if values[tree["column"]] <= tree["cut"] else "high"
+        tree = tree[branch]
+    return tree
 
 
-def main(record_count=100):
-    features, labels = load_training_data()
-    model = train(features, labels)
-    fields = [
-        "temperature", "pressure", "vibration", "rpm", "current",
-        "rule_state", "action", "ai_state",
-    ]
+def ai_state(forest, values):
+    predictions = [tree_vote(tree, values) for tree in forest]
+    return Counter(predictions).most_common(1)[0][0]
 
-    with open(LOG_FILE, "w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fields)
+
+def run(records=100):
+    training_inputs, training_outputs = read_training_file()
+    forest = train(training_inputs, training_outputs)
+    columns = SENSORS + ["rule_state", "action", "ai_state"]
+
+    with OUTPUT_FILE.open("a", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=columns)
         writer.writeheader()
-        for _ in range(record_count):
-            reading = generate_sensor_data()
-            rule_state, action = apply_rules(reading)
-            ai_reading = [
-                reading["temperature"],
-                reading["pressure"],
-                reading["vibration"],
-                reading["current"],
-                reading["rpm"],
-            ]
+        for _ in range(records):
+            reading = random_reading()
+            rule_state, action = rules_for(reading)
+            values = [reading[name] for name in SENSORS]
             writer.writerow({
                 **reading,
                 "rule_state": rule_state,
                 "action": action,
-                "ai_state": predict(model, ai_reading),
+                "ai_state": ai_state(forest, values),
             })
 
-    print(f"Logged {record_count} readings to {LOG_FILE}")
+    print(f"Logged {records} readings to {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
-    main()
+    run()
