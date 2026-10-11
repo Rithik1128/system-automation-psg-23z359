@@ -159,8 +159,12 @@ ACTION_URGENCY = {
 }
 
 
-def find_machine_needing_attention(machine_results):
-    """Return the most urgent machine result from the current factory tick."""
+def find_machine_needing_attention(machine_results, problem_counts=None):
+    """Return the most urgent machine result from the current factory tick.
+
+    If urgency and rule priority are tied, the machine that has encountered
+    its current problem most often is selected.
+    """
     urgent_results = [
         result
         for result in machine_results
@@ -168,21 +172,35 @@ def find_machine_needing_attention(machine_results):
     ]
     if not urgent_results:
         return None
+    if problem_counts is None:
+        problem_counts = {}
     return min(
         urgent_results,
         key=lambda result: (
             ACTION_URGENCY.get(result["action"], 5),
             result["rule_priority"],
+            -problem_counts.get(
+                (result["machine_id"], result["rule_name"]),
+                0,
+            ),
+            result["machine_id"],
         ),
     )
 
 
 def main():
+    problem_counts = {}
+
     for tick in range(1, 11):
         machine_results = []
         for machine_id in MACHINE_IDS:
             reading = generate_sensor_data()
             rule_name, action = evaluate_rules(reading, RULES)
+            problem_key = (machine_id, rule_name)
+            if action != "CONTINUE_NORMAL":
+                problem_counts[problem_key] = (
+                    problem_counts.get(problem_key, 0) + 1
+                )
             rule_priority = next(
                 (
                     rule["priority"]
@@ -197,22 +215,29 @@ def main():
                 "rule_name": rule_name,
                 "action": action,
                 "rule_priority": rule_priority,
+                "problem_frequency": problem_counts.get(problem_key, 0),
             }
             machine_results.append(result)
             print(
                 f"[Tick {tick:02d}] {machine_id} -> "
-                f"{reading} | {rule_name} | {take_action(action)}"
+                f"{reading} | {rule_name} "
+                f"(seen {result['problem_frequency']} time(s)) | "
+                f"{take_action(action)}"
             )
             log_decision(reading, rule_name, action, machine_id)
 
-        urgent_machine = find_machine_needing_attention(machine_results)
+        urgent_machine = find_machine_needing_attention(
+            machine_results,
+            problem_counts,
+        )
         if urgent_machine is None:
             print("           IMMEDIATE ATTENTION -> None; all machines normal\n")
         else:
             print(
                 f"           IMMEDIATE ATTENTION -> "
                 f"{urgent_machine['machine_id']} "
-                f"({urgent_machine['rule_name']})\n"
+                f"({urgent_machine['rule_name']}, "
+                f"seen {urgent_machine['problem_frequency']} time(s))\n"
             )
         time.sleep(0.2)
 
